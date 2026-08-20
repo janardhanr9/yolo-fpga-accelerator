@@ -29,6 +29,12 @@ layer 15's biases are counted separately.
 
 ## Build
 
+Weights (44,948,600 bytes) are not tracked in git; fetch into `models/`:
+
+```
+curl -o models/yolov2-tiny.weights https://data.pjreddie.com/files/yolov2-tiny.weights
+```
+
 ## Reference model
 
 ## RTL
