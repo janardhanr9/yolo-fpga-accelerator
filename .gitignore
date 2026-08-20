@@ -1,0 +1,18 @@
+# Model artifacts
+*.weights
+models/
+*.jpg
+
+# Generated test vectors
+vectors/
+
+# Python
+__pycache__/
+.venv/
+
+# Vivado
+*.jou
+*.log
+.Xil/
+*.cache/
+*.runs/
