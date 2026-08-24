@@ -86,7 +86,7 @@ def calibrate(collects, percentile=None):
     """
     # TODO 1: every collect dict has the same keys, so take the layer
     # indices from the first one rather than assuming a range.
-    collects[0]
+    layers = sorted(collects[0])
 
     # TODO 2: for each layer, combine that layer's tensors from every
     # image into one range. For percentile=None this is just the
@@ -94,6 +94,19 @@ def calibrate(collects, percentile=None):
     # percentile over all images' values pooled together -- not the
     # mean of per-image percentiles, which is a different and wrong
     # number.
+    ranges = {}
+    for index in layers:
+        if percentile is None:
+            # Each image collapses to a single float before anything is
+            # compared, so the whole set is never held at once.
+            ranges[index] = max(float(np.abs(c[index]).max()) for c in collects)
+        else:
+            # A percentile is a rank statistic and has to see every value
+            # together, so this branch really does pool the set. ravel()
+            # first: concatenate joins along an axis otherwise, which is a
+            # different operation that happens to look similar.
+            pooled = np.concatenate([np.abs(c[index]).ravel() for c in collects])
+            ranges[index] = float(np.percentile(pooled, percentile))
 
     return ranges
 
@@ -122,6 +135,9 @@ def choose_scale(absmax, bits=8):
     # TODO 3: return the scale. Guard the degenerate all-zeros tensor,
     # which would otherwise hand back a scale of zero and turn every
     # later division into a NaN.
+    if absmax == 0:
+        return 1.0
+    return absmax / (2**(bits-1) - 1)
 
 
 def quantize(v, scale, bits=8):
@@ -136,8 +152,23 @@ def quantize(v, scale, bits=8):
     direction, and across a fifteen-layer stack that bias compounds
     into a drift large enough to erase the detections entirely.
     """
-    # TODO 4: divide by the scale, round, clip to the signed range for
-    # `bits`, and return an integer dtype.
+    # The limits are not symmetric: two's complement gives one more code
+    # below zero than above. Using the same bound for both silently
+    # throws away a code and nothing will ever flag it.
+    lo, hi = -(2 ** (bits - 1)), 2 ** (bits - 1) - 1
+
+    # Round first, then clip. A value landing at 127.6 must become 128
+    # and then saturate to 127, which is the order the hardware applies
+    # them. np.round is banker's rounding on exact halves, a hair
+    # different from the round-half-up an adder implements; it matters
+    # only for values sitting exactly on .5, and requantize() is where
+    # the hardware-exact version lives.
+    codes = np.round(v / scale)
+
+    # int32 rather than the exact width: an int8 array would wrap on
+    # anything the clip missed, turning a bounds bug into the silent
+    # wraparound failure instead of an obviously out-of-range number.
+    return np.clip(codes, lo, hi).astype(np.int32)
 
 
 def dequantize(codes, scale):
@@ -149,9 +180,10 @@ def dequantize(codes, scale):
     to see what a format costs before running a whole network through
     it.
     """
-    # TODO 5: one multiply. Mind the dtype -- the result should be
-    # float32, not float64, or it will silently promote everything
-    # downstream of it.
+    # float32 explicitly. codes is an integer array and scale a Python
+    # float, so the natural result of the multiply is float64, which
+    # would quietly promote every downstream array it touches.
+    return (codes * np.float32(scale)).astype(np.float32)
 
 
 def requant_params(in_scale, weight_scale, out_scale, bits=16):
@@ -180,12 +212,22 @@ def requant_params(in_scale, weight_scale, out_scale, bits=16):
     and M is coarse enough to shift layer outputs visibly.
     """
     # TODO 6: form M from the three scales.
+    M = in_scale * weight_scale / out_scale
 
     # TODO 7: find the largest shift for which round(M * 2^shift) still
     # fits in a signed `bits`-bit integer, then return that mult and
     # shift. Think about what happens if M is itself larger than 1 --
     # it can be, when a layer's output range is narrower than its
     # input's, and the shift search has to still terminate.
+    hi = 2 ** (bits - 1) - 1
+    shift = int(np.floor(np.log2(hi / M)))
+    if shift < 0:
+        raise ValueError(
+            f'M={M:g} needs more than {bits} bits of multiplier; '
+            f'out_scale is too fine relative to in_scale * weight_scale')
+    mult = round(M * 2**shift)
+
+    return mult, shift
 
 
 def requantize(acc, mult, shift, bits=8):
@@ -212,6 +254,34 @@ def requantize(acc, mult, shift, bits=8):
     enough to overflow, which is precisely when you are optimizing and
     least expecting a regression.
     """
-    # TODO 8: multiply, add half an LSB, shift, saturate, return
-    # integer codes. Do the multiply in a width that cannot overflow --
-    # numpy will not warn you, and the answer will just be wrong.
+    # int64 throughout: the accumulator is already ~45 bits at 16-bit
+    # data and mult adds another 15, so anything narrower wraps. numpy
+    # raises a RuntimeWarning when a SCALAR multiply overflows but says
+    # nothing at all when an array one does -- and this is always an
+    # array. So the width is asserted rather than assumed.
+    acc = np.asarray(acc, dtype=np.int64)
+    span = int(np.abs(acc).max()) if acc.size else 0
+    assert span * abs(int(mult)) < 2**62, (
+        f'acc*mult needs more than 63 bits (acc up to {span}, mult {mult}); '
+        f'narrow the multiplier or truncate the accumulator first')
+
+    scaled = acc * np.int64(mult)
+
+    # Half an LSB before the shift is what makes this rounding rather
+    # than truncation. numpy's >> on signed integers is an arithmetic
+    # shift, so it floors toward negative infinity exactly as the RTL's
+    # >>> does; adding half first turns that floor into round-half-up.
+    #
+    # Round-half-up, not round-half-even: an exact .5 goes toward
+    # positive infinity for both signs. That differs from np.round in
+    # quantize(), and deliberately so -- this function models the
+    # hardware, and one adder plus a shift is what the hardware can
+    # afford.
+    if shift > 0:
+        scaled = (scaled + (np.int64(1) << (shift - 1))) >> shift
+
+    # Saturate, never wrap. A wrapped value sends the largest activation
+    # in a channel to the most negative one, which stays plausible
+    # enough to survive a smoke test and quietly costs real accuracy.
+    lo, hi = -(2 ** (bits - 1)), 2 ** (bits - 1) - 1
+    return np.clip(scaled, lo, hi).astype(np.int32)
