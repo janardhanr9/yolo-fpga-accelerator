@@ -21,3 +21,8 @@ __pycache__/
 .Xil/
 *.cache/
 *.runs/
+
+# Simulation build products
+build/
+*.vcd
+*.out
