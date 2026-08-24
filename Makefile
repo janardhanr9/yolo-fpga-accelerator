@@ -1,28 +1,34 @@
 # Reference model and RTL simulation.
 #
 #   make test     python reference-model tests
-#   make sim      run every testbench in tb/
+#   make sim      run every testbench in tb/ under iverilog
+#   make simv     same, under verilator (slower to build, stricter)
+#   make lint     verilator's static checks only
 #   make wave     open the last VCD (needs gtkwave or surfer)
-#   make lint     verilator's static checks, stricter than iverilog's
 #   make clean
+#
+# SystemVerilog, but restricted to what Icarus also accepts: no
+# variable indexing into packed multi-dimensional arrays, and no named
+# struct assignment patterns. Losing the fast simulator costs more than
+# the nicer syntax is worth. Unpacked arrays index fine on both.
 
 PY      := .venv/bin/python
 IVERILOG:= iverilog -g2012 -Wall
 BUILD   := build
 
-TBS     := $(wildcard tb/tb_*.v)
-OUTS    := $(patsubst tb/%.v,$(BUILD)/%.out,$(TBS))
+TBS     := $(wildcard tb/tb_*.sv)
+OUTS    := $(patsubst tb/%.sv,$(BUILD)/%.out,$(TBS))
 
-.PHONY: test sim wave lint clean all
+.PHONY: test sim simv wave lint clean all
 all: test sim
 
 test:
 	@$(PY) tests/run.py
 
 # Each testbench is paired with the rtl/ module of the same name:
-# tb/tb_line_buffer.v drives rtl/line_buffer.v.
-$(BUILD)/tb_%.out: tb/tb_%.v rtl/%.v | $(BUILD)
-	@$(IVERILOG) -o $@ $^
+# tb/tb_line_buffer.sv drives rtl/line_buffer.sv.
+$(BUILD)/tb_%.out: tb/tb_%.sv rtl/%.sv | $(BUILD)
+	@$(IVERILOG) -o $@ $^ 2>&1 | grep -v 'cannot be synthesized in an always_ff' || true
 
 sim: $(OUTS)
 	@for out in $(OUTS); do \
@@ -30,8 +36,21 @@ sim: $(OUTS)
 	  vvp $$out | grep -vE '^(VCD info|.*\$$finish)' || true; \
 	done
 
+# Verilator builds a real binary, so it catches races and width issues
+# iverilog lets through -- worth running before you believe a PASS.
+simv:
+	@for tb in $(TBS); do \
+	  name=$$(basename $$tb .sv); \
+	  dut=rtl/$${name#tb_}.sv; \
+	  echo "--- $$name"; \
+	  verilator --binary -Wno-fatal --timing -Mdir $(BUILD)/$$name \
+	    -o $$name $$tb $$dut >/dev/null 2>&1 \
+	    && $(BUILD)/$$name/$$name 2>&1 | grep -E '^(PASS|FAIL| )' \
+	    || echo "  build failed"; \
+	done
+
 lint:
-	@for f in rtl/*.v; do \
+	@for f in rtl/*.sv; do \
 	  echo "--- $$f"; \
 	  verilator --lint-only -Wall $$f || true; \
 	done

@@ -13,44 +13,51 @@
 // failure messages stay readable. Scale the parameters up once it
 // passes; the layer-0 geometry is IMG_W=416, IMG_H=416, C_IN=3.
 //
-//   iverilog -g2012 -o tb.out tb/tb_line_buffer.v rtl/line_buffer.v
-//   vvp tb.out
+//   make sim                  iverilog, fast iteration
+//   make lint                 verilator's stricter static checks
+//   make simv                 verilator simulation
 
 module tb_line_buffer;
 
-    localparam integer DATA_W = 8;
-    localparam integer IMG_W  = 8;
-    localparam integer IMG_H  = 6;
-    localparam integer C_IN   = 2;
-    localparam integer K      = 3;
-    localparam integer PAD    = 1;
+    localparam int DATA_W = 8;
+    localparam int IMG_W  = 8;
+    localparam int IMG_H  = 6;
+    localparam int C_IN   = 2;
+    localparam int K      = 3;
+    localparam int PAD    = 1;
 
-    localparam integer W_OUT  = (IMG_W + 2*PAD - K) + 1;
-    localparam integer H_OUT  = (IMG_H + 2*PAD - K) + 1;
-    localparam integer N_OUT  = W_OUT * H_OUT * C_IN;
+    localparam int W_OUT  = (IMG_W + 2*PAD - K) + 1;
+    localparam int H_OUT  = (IMG_H + 2*PAD - K) + 1;
+    localparam int N_OUT  = W_OUT * H_OUT * C_IN;
+    localparam int CH_W   = $clog2(C_IN > 1 ? C_IN : 2);
+
+    // Guards against a DUT that never handshakes. A testbench that
+    // hangs tells you nothing; one that fails tells you where to look.
+    localparam int STALL_MAX  = 1000;
+    localparam time TIMEOUT_NS = 10ms;
 
     // Every sample is a function of where it is, so a misaddressed read
     // shows up as a wrong value instead of believable data.
-    function signed [DATA_W-1:0] pattern(input integer r, c, ch);
-        pattern = ((r * IMG_W + c) * C_IN + ch) % 127;
+    function automatic logic signed [DATA_W-1:0] pattern(int r, c, ch);
+        return DATA_W'(((r * IMG_W + c) * C_IN + ch) % 127);
     endfunction
 
     // Zero outside the image: the padding convolution expects.
-    function signed [DATA_W-1:0] sample(input integer r, c, ch);
-        if (r < 0 || r >= IMG_H || c < 0 || c >= IMG_W) sample = 0;
-        else                                            sample = pattern(r, c, ch);
+    function automatic logic signed [DATA_W-1:0] sample(int r, c, ch);
+        if (r < 0 || r >= IMG_H || c < 0 || c >= IMG_W) return '0;
+        else                                            return pattern(r, c, ch);
     endfunction
 
-    reg clk = 0, rst_n = 0;
+    logic clk = 0, rst_n = 0;
     always #5 clk = ~clk;
 
-    reg                      in_valid = 0;
-    reg signed [DATA_W-1:0]  in_data  = 0;
-    wire                     in_ready;
-    wire                     out_valid;
-    wire signed [K*K*DATA_W-1:0] out_window;
-    wire [$clog2(C_IN > 1 ? C_IN : 2)-1:0] out_ch;
-    wire                     out_last;
+    logic                     in_valid = 0;
+    logic signed [DATA_W-1:0] in_data  = 0;
+    logic                     in_ready;
+    logic                     out_valid;
+    logic signed [K*K*DATA_W-1:0] out_window;
+    logic [CH_W-1:0]          out_ch;
+    logic                     out_last;
 
     line_buffer #(
         .DATA_W(DATA_W), .IMG_W(IMG_W), .IMG_H(IMG_H),
@@ -62,58 +69,68 @@ module tb_line_buffer;
         .out_ch(out_ch), .out_last(out_last)
     );
 
-    integer errors = 0;
-    integer seen   = 0;
+    int errors = 0;
+    int seen   = 0;
 
     // Expected windows are consumed in emission order: output row, then
     // column, then channel.
-    task check_window(input integer idx);
-        integer orow, ocol, och, i, j, tap;
-        reg signed [DATA_W-1:0] want, got;
+    task automatic check_window(int idx);
+        int orow, ocol, och;
+        logic signed [DATA_W-1:0] want, got;
         begin
             och  =  idx % C_IN;
             ocol = (idx / C_IN) % W_OUT;
             orow =  idx / (C_IN * W_OUT);
 
-            if (out_ch !== och[$clog2(C_IN > 1 ? C_IN : 2)-1:0]) begin
+            if (out_ch !== CH_W'(och)) begin
                 $display("  FAIL window %0d: out_ch %0d, expected %0d",
                          idx, out_ch, och);
-                errors = errors + 1;
+                errors++;
             end
 
-            for (i = 0; i < K; i = i + 1)
-                for (j = 0; j < K; j = j + 1) begin
-                    tap  = i * K + j;
+            for (int i = 0; i < K; i++)
+                for (int j = 0; j < K; j++) begin
                     want = sample(orow - PAD + i, ocol - PAD + j, och);
-                    got  = out_window[tap*DATA_W +: DATA_W];
+                    got  = out_window[(i*K + j)*DATA_W +: DATA_W];
                     if (got !== want) begin
                         $display("  FAIL window %0d (row %0d col %0d ch %0d) tap [%0d][%0d]: got %0d, expected %0d",
                                  idx, orow, ocol, och, i, j, got, want);
-                        errors = errors + 1;
+                        errors++;
                     end
                 end
 
             if (out_last !== (idx == N_OUT - 1)) begin
                 $display("  FAIL window %0d: out_last %0b, expected %0b",
                          idx, out_last, (idx == N_OUT-1));
-                errors = errors + 1;
+                errors++;
             end
         end
     endtask
 
-    // Collector: every accepted output window is checked as it appears.
-    always @(posedge clk) begin
+    // Collector: every emitted window is checked as it appears.
+    always_ff @(posedge clk) begin
         if (rst_n && out_valid) begin
             if (seen < N_OUT) check_window(seen);
             else begin
                 $display("  FAIL: extra window emitted past the expected %0d", N_OUT);
-                errors = errors + 1;
+                errors++;
             end
-            seen = seen + 1;
+            seen++;
         end
     end
 
-    integer r, c, ch, cyc;
+    // Watchdog. Nothing here should take milliseconds; if it does, the
+    // DUT is stalled and the run must end with a verdict rather than
+    // spinning until someone notices.
+    initial begin
+        #TIMEOUT_NS;
+        $display("");
+        $display("FAIL  timed out with %0d of %0d windows emitted", seen, N_OUT);
+        $display("      (in_ready never asserted, or out_valid never fired)");
+        $finish;
+    end
+
+    int cyc, stall;
     initial begin
         $dumpfile("tb_line_buffer.vcd");
         $dumpvars(0, tb_line_buffer);
@@ -123,14 +140,21 @@ module tb_line_buffer;
         @(posedge clk);
 
         // stream the frame in, raster order, channel innermost
-        for (r = 0; r < IMG_H; r = r + 1)
-            for (c = 0; c < IMG_W; c = c + 1)
-                for (ch = 0; ch < C_IN; ch = ch + 1) begin
+        for (int r = 0; r < IMG_H; r++)
+            for (int c = 0; c < IMG_W; c++)
+                for (int ch = 0; ch < C_IN; ch++) begin
                     @(negedge clk);
                     in_valid = 1;
                     in_data  = pattern(r, c, ch);
                     @(posedge clk);
-                    while (!in_ready) @(posedge clk);   // honour backpressure
+                    // Honour backpressure, but bounded: an undriven
+                    // in_ready reads as 0 under Verilator, and an
+                    // unbounded wait would hang instead of failing.
+                    stall = 0;
+                    while (!in_ready && stall < STALL_MAX) begin
+                        @(posedge clk);
+                        stall++;
+                    end
                 end
 
         @(negedge clk);
@@ -140,12 +164,12 @@ module tb_line_buffer;
         cyc = 0;
         while (seen < N_OUT && cyc < 10*N_OUT + 1000) begin
             @(posedge clk);
-            cyc = cyc + 1;
+            cyc++;
         end
 
         if (seen != N_OUT) begin
             $display("  FAIL: %0d windows emitted, expected %0d", seen, N_OUT);
-            errors = errors + 1;
+            errors++;
         end
 
         $display("");

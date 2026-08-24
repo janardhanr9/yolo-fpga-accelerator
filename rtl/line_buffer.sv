@@ -11,7 +11,7 @@
 //
 //     for row: for col: for ch: one DATA_W sample
 //
-// and the output is one K*K window per (output position, channel).
+// and the output is one K x K window per (output position, channel).
 // Channels stream one at a time rather than in parallel because C_IN
 // reaches 1024 on layer 13; a channel-parallel window would be 9216
 // wires.
@@ -28,37 +28,51 @@
 // pads one-sided with -inf and belongs in a different module.
 
 module line_buffer #(
-    parameter integer DATA_W = 8,      // sample width, signed
-    parameter integer IMG_W  = 416,    // input width in pixels
-    parameter integer IMG_H  = 416,    // input height in pixels
-    parameter integer C_IN   = 3,      // input channels
-    parameter integer K      = 3,      // kernel size
-    parameter integer PAD    = 1       // pixels of zero padding per edge
+    parameter int DATA_W = 8,      // sample width, signed
+    parameter int IMG_W  = 416,    // input width in pixels
+    parameter int IMG_H  = 416,    // input height in pixels
+    parameter int C_IN   = 3,      // input channels
+    parameter int K      = 3,      // kernel size
+    parameter int PAD    = 1       // pixels of zero padding per edge
 )(
-    input  wire                          clk,
-    input  wire                          rst_n,
+    input  logic clk,
+    input  logic rst_n,
 
     // input stream: raster order, channel innermost
-    input  wire                          in_valid,
-    input  wire signed [DATA_W-1:0]      in_data,
-    output wire                          in_ready,
+    input  logic                     in_valid,
+    input  logic signed [DATA_W-1:0] in_data,
+    output logic                     in_ready,
 
-    // output stream: one K*K window per (output position, channel)
-    output wire                          out_valid,
-    output wire signed [K*K*DATA_W-1:0]  out_window,  // row-major, [0] = top-left
-    output wire [$clog2(C_IN > 1 ? C_IN : 2)-1:0] out_ch,
-    output wire                          out_last     // final window of the frame
+    // Output stream: one K x K window per (output position, channel).
+    //
+    // Flat rather than a packed [K-1:0][K-1:0] array because Icarus
+    // cannot index a packed multi-dimensional array with a variable,
+    // and losing the fast simulator is a worse trade than losing the
+    // nicer syntax. Tap (i, j) lives at
+    //
+    //     out_window[(i*K + j)*DATA_W +: DATA_W]
+    //
+    // row-major, so [0] is the top-left tap -- the same layout as the
+    // reference model's cols[:, i, j]. Use the WIN macro below rather
+    // than writing that expression out.
+    output logic                                   out_valid,
+    output logic signed [K*K*DATA_W-1:0]           out_window,
+    output logic [$clog2(C_IN > 1 ? C_IN : 2)-1:0] out_ch,
+    output logic                                   out_last
 );
 
+    // Tap accessor. Works with variable i and j on every simulator.
+    `define WIN(i, j) out_window[((i)*K + (j))*DATA_W +: DATA_W]
+
     // Output geometry, same formula the reference model uses.
-    localparam integer W_OUT = (IMG_W + 2*PAD - K) + 1;
-    localparam integer H_OUT = (IMG_H + 2*PAD - K) + 1;
+    localparam int W_OUT = (IMG_W + 2*PAD - K) + 1;
+    localparam int H_OUT = (IMG_H + 2*PAD - K) + 1;
 
     // TODO 1: declare the storage. It needs to hold K-1 rows of
-    // IMG_W * C_IN samples. Write it as a flat reg array indexed by a
-    // linear address rather than a 3-D array: Vivado infers block RAM
-    // from the flat form and will fall back to distributed LUT RAM,
-    // which at 26 KB will not fit, if you nest the dimensions.
+    // IMG_W * C_IN samples. Use an unpacked array indexed by a linear
+    // address -- Vivado infers block RAM from that shape, and will
+    // fall back to distributed LUT RAM, which at 26 KB will not fit,
+    // if you make the whole thing packed.
 
     // TODO 2: input counters. Track which (row, col, channel) the
     // incoming sample belongs to, incrementing channel innermost so
@@ -69,15 +83,26 @@ module line_buffer #(
     // the row part wraps: the arriving row overwrites the oldest one
     // still held. Work out the address from the counters in TODO 2.
     // An off-by-one here reads a neighbouring row's data and produces
-    // a window that looks plausible, so get it right before trusting
-    // any output.
+    // a window that looks entirely plausible, so get it right before
+    // trusting any output.
 
-    // TODO 4: the window registers. K*K of them, DATA_W wide. On each
-    // accepted sample they shift left by one column, and the rightmost
-    // column takes the newly available values: the K-1 buffered rows
-    // plus in_data itself as the bottom row. Note the window's rows
-    // come from different sources -- the buffer for the old rows, the
-    // input for the new one.
+    // TODO 4: the window registers. Hold them as an UNPACKED array,
+    //
+    //     logic signed [DATA_W-1:0] win [K][K];
+    //
+    // which every simulator will let you index with variables, and
+    // bridge it to the flat port with a genvar loop -- genvars are
+    // constants, so that indexing is legal everywhere:
+    //
+    //     for (genvar i = 0; i < K; i++)
+    //       for (genvar j = 0; j < K; j++)
+    //         assign `WIN(i, j) = win[i][j];
+    //
+    // On each accepted sample the window shifts left by one column and
+    // the rightmost column takes the newly available values: the K-1
+    // buffered rows plus in_data itself as the bottom row. Note the
+    // window's rows come from different sources -- the buffer for the
+    // old rows, the input for the new one.
 
     // TODO 5: padding. A window position whose source row or column
     // falls outside the image must read zero rather than whatever the
@@ -96,5 +121,7 @@ module line_buffer #(
     // TODO 7: backpressure. in_ready can be tied high for now -- the
     // module never stalls on its own -- but leave the port so the DMA
     // side does not need rewiring when a downstream FIFO fills.
+
+    `undef WIN
 
 endmodule
