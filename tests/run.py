@@ -487,6 +487,229 @@ def preprocess_letterboxes_without_distorting():
     assert 0.0 <= x.min() and x.max() <= 1.0
 
 
+# ------------------------------------------------------ quantization
+
+
+def calib_set():
+    """Collected activations for every calibration image, or skip."""
+    net, spec = need_model()
+    import glob
+    paths = sorted(glob.glob(os.path.join(ROOT, 'calib', '*.jpg')))
+    if len(paths) < 2:
+        raise Skip('need at least two calib/*.jpg images')
+    collects = []
+    for path in paths:
+        c = {}
+        model.forward(model.preprocess(path, 416, 416), spec, c)
+        collects.append(c)
+    return spec, collects
+
+
+@test
+def calibrate_takes_the_max_over_the_whole_set():
+    spec, collects = calib_set()
+    got = quant.calibrate(collects)
+
+    assert sorted(got) == sorted(collects[0]), 'keys are not the layer indices'
+    assert all(isinstance(v, float) for v in got.values()), \
+        'values are not plain floats; numpy scalars promote downstream'
+
+    # brute force: flatten every image's tensor into one python list
+    for i in (9, 11, 13, 14):        # the small layers; the big ones are slow
+        vals = []
+        for c in collects:
+            vals.extend(np.abs(c[i]).reshape(-1).tolist())
+        close(got[i], max(vals), 0.0, f'calibrate max, layer {i}')
+
+    # The point of the function: a set peaks higher than one image. If this
+    # ever stops holding, the calibration images have lost their variety.
+    single = {i: float(np.abs(collects[0][i]).max()) for i in got}
+    higher = sum(1 for i in got if got[i] > single[i])
+    assert higher >= len(got) // 2, \
+        f'only {higher} of {len(got)} layers exceed image 0 -- images too similar?'
+
+
+@test
+def calibrate_pools_percentiles_across_images():
+    spec, collects = calib_set()
+    for pct in (99.9, 99.0, 50.0):
+        got = quant.calibrate(collects, percentile=pct)
+        for i in (11, 13, 14):
+            vals = []
+            for c in collects:
+                vals.extend(np.abs(c[i]).reshape(-1).tolist())
+            want = float(np.percentile(np.array(vals), pct))
+            close(got[i], want, 1e-5, f'calibrate p{pct}, layer {i}')
+        # a percentile must sit at or below the max, and above the median
+        full = quant.calibrate(collects)
+        for i in got:
+            assert got[i] <= full[i] + 1e-6, f'p{pct} above the max on layer {i}'
+
+
+@test
+def choose_scale_puts_the_peak_on_the_top_code():
+    for bits in (4, 8, 16, 24):
+        limit = 2 ** (bits - 1) - 1
+        for absmax in (55.21, 1.0, 0.0727, 1e-6):
+            scale = quant.choose_scale(absmax, bits)
+            close(absmax / scale, limit, 1e-6 * limit,
+                  f'choose_scale({absmax}, {bits})')
+    # An all-zero tensor has no meaningful scale, but zero would make every
+    # later division a NaN -- and NaN propagates without ever raising.
+    z = quant.choose_scale(0.0, 8)
+    assert z != 0 and isinstance(z, float), f'zero guard returned {z!r}'
+    assert np.isfinite(np.zeros(4, dtype=np.float32) / np.float32(z)).all()
+
+
+@test
+def quantize_rounds_clips_and_stays_integral():
+    for bits in (4, 8, 16):
+        lo, hi = -(2 ** (bits - 1)), 2 ** (bits - 1) - 1
+        scale = quant.choose_scale(1.0, bits)
+
+        # saturation, both directions, no wraparound
+        codes = quant.quantize(np.float32([-1e9, -1.0, 0.0, 1.0, 1e9]), scale, bits)
+        assert codes.min() == lo and codes.max() == hi, f'bits={bits}: {codes}'
+        assert np.issubdtype(codes.dtype, np.integer), codes.dtype
+
+        # round-trip error cannot exceed half a step, plus float32 noise
+        rng = np.random.default_rng(bits)
+        v = (rng.random(50000, dtype=np.float32) * 2 - 1).astype(np.float32)
+        back = quant.dequantize(quant.quantize(v, scale, bits), scale)
+        err = float(np.abs(back - v).max())
+        assert err <= scale / 2 * 1.01, f'bits={bits}: {err:.3e} > {scale/2:.3e}'
+
+    # Rounding, not truncation. Truncation biases every value one way and
+    # compounds across fifteen layers into drift that erases detections.
+    v = np.float32([0.4, 0.6, -0.4, -0.6, 1.4, 1.6])
+    close(quant.quantize(v, 1.0, 8), [0, 1, 0, -1, 1, 2], 0, 'quantize rounds')
+
+
+@test
+def dequantize_stays_float32():
+    codes = quant.quantize(np.float32([1.0, -1.0]), 0.01, 8)
+    out = quant.dequantize(codes, 0.01)
+    assert out.dtype == np.float32, f'{out.dtype} would promote everything downstream'
+    close(out, codes * 0.01, 1e-6, 'dequantize')
+
+
+@test
+def requant_params_finds_the_largest_shift_that_fits():
+    for bits in (8, 12, 16, 24):
+        limit = 2 ** (bits - 1) - 1
+        for m in (1.578e-05, 2.941e-05, 1e-3, 0.1, 0.9999, 1.0, 2.5, 100.0):
+            mult, shift = quant.requant_params(1.0, m, 1.0, bits)
+
+            assert isinstance(mult, int) and isinstance(shift, int), \
+                'a numpy scalar cannot index a bit position or land in a .mem file'
+            assert mult <= limit, f'mult {mult} overflows {bits} bits'
+            assert shift >= 0, f'negative shift {shift} cannot be done in hardware'
+
+            # maximal: one more bit of shift must overflow
+            assert round(m * 2 ** (shift + 1)) > limit, \
+                f'M={m} bits={bits}: shift {shift} is not the largest that fits'
+            close(mult, round(m * 2 ** shift), 0, f'mult for M={m}')
+            # and the pair reconstructs M to within the rounding of mult
+            # itself: mult is off by at most half, so M is off by at most
+            # half an LSB of mult. A narrow multiplier is allowed to be
+            # coarse -- it is not allowed to be wrong.
+            bound = 0.5 / mult * 1.001
+            assert abs(mult / 2 ** shift / m - 1) <= bound, \
+                f'M={m} bits={bits} reconstructs as {mult / 2**shift}, ' \
+                f'off by more than half an LSB of mult={mult}'
+
+
+@test
+def requant_params_refuses_an_impossible_scale():
+    # M larger than the multiplier's range needs a left shift, which the
+    # hardware cannot do. Silently returning a negative shift would be a
+    # wrong answer rather than a crash.
+    try:
+        quant.requant_params(1.0, 1e6, 1.0, 16)
+    except ValueError:
+        return
+    raise AssertionError('an out-of-range M returned a shift instead of raising')
+
+
+@test
+def requantize_matches_exact_integer_arithmetic():
+    rng = np.random.default_rng(1)
+    for bits in (8, 16):
+        lo, hi = -(2 ** (bits - 1)), 2 ** (bits - 1) - 1
+        for shift in (0, 1, 7, 22, 30):
+            mult = int(rng.integers(1, 2 ** 15))
+            acc = rng.integers(-2 ** 30, 2 ** 30, size=3000, dtype=np.int64)
+            got = quant.requantize(acc, mult, shift, bits)
+
+            # the same thing in unbounded python ints, no numpy involved
+            want = []
+            for a in acc.tolist():
+                p = a * mult
+                if shift > 0:
+                    p = (p + (1 << (shift - 1))) >> shift
+                want.append(max(lo, min(hi, p)))
+            assert np.array_equal(got, np.array(want)), \
+                f'bits={bits} shift={shift} mult={mult}'
+
+
+@test
+def requantize_rounds_half_up_and_saturates():
+    # Half an LSB before an arithmetic shift turns a floor into a round.
+    # A bare shift floors toward negative infinity, biasing every value the
+    # same way, and fifteen layers of that erases the detections.
+    acc = np.arange(-5, 6, dtype=np.int64)
+    rounded = quant.requantize(acc, 1, 1, 8)
+    close(rounded, [-2, -2, -1, -1, 0, 0, 1, 1, 2, 2, 3], 0, 'round half up')
+    assert float(rounded.mean()) > float((acc >> 1).mean()), \
+        'no upward correction: this is truncating, not rounding'
+
+    # Saturate, never wrap. A wrapped value sends a channel's largest
+    # activation to its most negative and still looks plausible.
+    out = quant.requantize(np.int64([-10 ** 6, 0, 10 ** 6]), 1, 0, 8)
+    close(out, [-128, 0, 127], 0, 'saturation')
+
+
+@test
+def requantize_refuses_to_overflow_int64():
+    # numpy raises on scalar integer overflow but is completely silent on
+    # arrays, and this function always takes arrays.
+    try:
+        quant.requantize(np.int64([2 ** 44]), 2 ** 23, 30, 8)
+    except AssertionError as exc:
+        assert 'bits' in str(exc), f'unhelpful message: {exc}'
+        return
+    raise AssertionError('a 67-bit product wrapped silently instead of asserting')
+
+
+@test
+def an_integer_convolution_tracks_the_float_one():
+    """The whole module end to end: quantize both operands, convolve in
+    integers the way the MAC array will, requantize, and come back."""
+    spec, collects = calib_set()
+    ranges = quant.calibrate(collects)
+    bits = 16
+
+    entry = next(e for e in spec if e['index'] == 0)
+    x = model.preprocess(os.path.join(ROOT, 'calib', 'dog.jpg'), 416, 416)[:, :48, :48]
+    n = entry['weights'].shape[0]
+
+    in_s = quant.choose_scale(float(np.abs(x).max()), bits)
+    w_s = quant.choose_scale(float(np.abs(entry['weights']).max()), bits)
+    out_s = quant.choose_scale(ranges[0], bits)
+    mult, shift = quant.requant_params(in_s, w_s, out_s, 16)
+
+    xq = quant.quantize(x, in_s, bits)
+    wq = quant.quantize(entry['weights'], w_s, bits)
+    acc = layers.conv2d(xq.astype(np.float64), wq.astype(np.float64),
+                        np.zeros(n), 1, 1).round().astype(np.int64)
+    got = quant.dequantize(quant.requantize(acc, mult, shift, bits), out_s)
+
+    want = layers.conv2d(x, entry['weights'], np.zeros(n, dtype=np.float32), 1, 1)
+    full = float(np.abs(want).max())
+    err = float(np.abs(got - want).max())
+    assert err / full < 1e-3, f'{err:.3e} is {err/full:.2%} of full scale'
+
+
 # ------------------------------------------------------------ end to end
 
 
