@@ -424,6 +424,26 @@ def nms_suppresses_within_a_class_only():
     pair = [{'box': (0.5, 0.5, 0.3, 0.3), 'class': 2, 'score': s} for s in (0.9, 0.5)]
     assert len(model.nms(pair)) == 1
 
+    # Exercise the DEFAULT threshold, not just an explicit one: two boxes
+    # overlapping well below it must both survive. Without this, changing
+    # the default is invisible to the whole suite -- real objects in a
+    # crowd overlap, and a default that merges them loses detections.
+    touching = [{'box': (0.450, 0.5, 0.2, 0.2), 'class': 3, 'score': 0.9},
+                {'box': (0.546, 0.5, 0.2, 0.2), 'class': 3, 'score': 0.8}]
+    assert 0.20 < model.iou(touching[0]['box'], touching[1]['box']) < 0.45, \
+        'test fixture no longer straddles the default threshold'
+    assert len(model.nms(touching)) == 2, 'default threshold merged distinct boxes'
+
+    # ...and pinned from the other side: a heavily overlapping pair, well
+    # above the default but below 1.0, must merge. Together these two
+    # fixtures bracket the default, so moving it in either direction
+    # fails rather than silently changing how many boxes you report.
+    duplicate = [{'box': (0.50, 0.5, 0.2, 0.2), 'class': 4, 'score': 0.9},
+                 {'box': (0.52, 0.5, 0.2, 0.2), 'class': 4, 'score': 0.8}]
+    assert 0.45 < model.iou(duplicate[0]['box'], duplicate[1]['box']) < 1.0, \
+        'test fixture no longer straddles the default threshold'
+    assert len(model.nms(duplicate)) == 1, 'default threshold failed to merge duplicates'
+
 
 # -------------------------------------------------------- letterbox
 
@@ -471,13 +491,13 @@ def preprocess_letterboxes_without_distorting():
 
 
 @test
-def the_dog_image_still_detects_a_dog():
+def the_labrador_image_still_detects_a_dog():
     """Guards accuracy, not just shapes: everything else here would pass
     on a model whose weights were subtly mis-parsed."""
     net, spec = need_model()
-    path = os.path.join(ROOT, 'calib', 'dog.jpg')
+    path = os.path.join(ROOT, 'calib', 'labrador.jpg')
     if not os.path.exists(path):
-        raise Skip('calib/dog.jpg not present')
+        raise Skip('calib/labrador.jpg not present')
     from PIL import Image
     size = Image.open(path).size
     x = model.preprocess(path, int(net['width']), int(net['height']))
@@ -489,6 +509,48 @@ def the_dog_image_still_detects_a_dog():
     bx, by, bw, bh = dog[0]['box']
     assert 0.2 < bx < 0.8 and 0.2 < by < 0.8, f'dog centre drifted to {bx:.2f},{by:.2f}'
     assert 0.3 < bw < 0.9 and 0.3 < bh < 1.0, f'dog box size {bw:.2f}x{bh:.2f}'
+
+
+@test
+def darknet_canonical_images_detect_their_published_objects():
+    """The multi-object cases. A single-subject photo cannot catch a
+    class-index off-by-one or an NMS bug that collapses distinct
+    objects, because there is only ever one right answer in frame.
+
+    These are darknet's own test images and these are the objects its
+    published yolov2-tiny output finds in them.
+    """
+    net, spec = need_model()
+    from PIL import Image
+    expected = {
+        'person.jpg': {0: 'person', 16: 'dog', 17: 'horse'},
+        'dog.jpg': {1: 'bicycle', 2: 'car', 16: 'dog'},
+        'horses.jpg': {17: 'horse'},
+        'eagle.jpg': {14: 'bird'},
+    }
+    for name, want in expected.items():
+        path = os.path.join(ROOT, 'calib', name)
+        if not os.path.exists(path):
+            raise Skip(f'calib/{name} not present')
+        size = Image.open(path).size
+        x = model.preprocess(path, int(net['width']), int(net['height']))
+        dets = model.nms(model.decode(model.forward(x, spec), spec,
+                                      thresh=0.24, shape=size))
+        found = {d['class'] for d in dets}
+        missing = {c: n for c, n in want.items() if c not in found}
+        assert not missing, f'{name}: missing {list(missing.values())}, got {sorted(found)}'
+        # boxes must be inside the frame and non-degenerate
+        for d in dets:
+            bx, by, bw, bh = d['box']
+            assert bw > 0 and bh > 0, f'{name}: degenerate box {d["box"]}'
+            assert -0.1 < bx < 1.1 and -0.1 < by < 1.1, f'{name}: box off frame {d["box"]}'
+    # horses.jpg has four; NMS must not collapse them into one
+    path = os.path.join(ROOT, 'calib', 'horses.jpg')
+    size = Image.open(path).size
+    x = model.preprocess(path, 416, 416)
+    dets = model.nms(model.decode(model.forward(x, spec), spec, thresh=0.24, shape=size))
+    horses = [d for d in dets if d['class'] == 17]
+    assert len(horses) >= 3, f'NMS collapsed the herd to {len(horses)}'
 
 
 # ------------------------------------------------------------------ main
