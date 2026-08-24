@@ -55,3 +55,163 @@ def fold(entry, eps=1e-6):
     folded_biases = beta - mean * scale
 
     return folded_weights, folded_biases
+
+
+def calibrate(collects, percentile=None):
+    """Measure each layer's activation range across a set of images.
+
+    `collects` is a list of the dicts forward() fills when handed a
+    collect argument -- one per calibration image. Returns a dict
+    mapping layer index to a single absolute range for that layer.
+
+    Taking already-collected tensors rather than image paths is
+    deliberate: model.py imports this module, so importing model here
+    would be a cycle. It also keeps the expensive part -- the forward
+    passes -- in the caller's hands, where it can be done once and
+    reused.
+
+    With `percentile` set to, say, 99.9, the range is that percentile
+    of the absolute values instead of the true maximum. That
+    deliberately clips the largest handful of activations in exchange
+    for finer resolution on everything else. Whether that trade is
+    worth it is a real question and the answer differs per layer; the
+    measured version of the question is what this function exists to
+    answer.
+
+    One image is not a calibration set. Across darknet's eight test
+    images, ten of the fifteen layers peak higher than any single
+    image suggests, two of them by a factor of two. A range measured
+    too low does not degrade gracefully -- it clips, and the clipped
+    values are exactly the strong activations the detector keys on.
+    """
+    # TODO 1: every collect dict has the same keys, so take the layer
+    # indices from the first one rather than assuming a range.
+    collects[0]
+
+    # TODO 2: for each layer, combine that layer's tensors from every
+    # image into one range. For percentile=None this is just the
+    # largest absolute value seen anywhere. For a percentile it is the
+    # percentile over all images' values pooled together -- not the
+    # mean of per-image percentiles, which is a different and wrong
+    # number.
+
+    return ranges
+
+
+def choose_scale(absmax, bits=8):
+    """Return the scale factor for a tensor with range +-absmax.
+
+    A quantized tensor stores integer codes; the scale is what turns a
+    code back into a real value:  value = code * scale. Picking it is
+    the whole game. Too large and the codes bunch up near zero, wasting
+    resolution; too small and the extremes clip.
+
+    Signed `bits`-bit codes run from -2^(bits-1) to 2^(bits-1) - 1. The
+    positive limit is the smaller of the two, so sizing against it is
+    what keeps the largest value representable.
+
+    Note what this deliberately does NOT do: round the scale to a power
+    of two. A power-of-two scale makes dequantization a shift, which is
+    free in hardware, but it can only land on octave boundaries -- a
+    tensor peaking at 16.04 gets a range of 32 and wastes half its
+    codes. Measured on this network that costs about 30% of the code
+    space on average and a great deal of recall. The multiplier it
+    takes to avoid that is cheaper than it looks, because it runs once
+    per output element rather than once per MAC.
+    """
+    # TODO 3: return the scale. Guard the degenerate all-zeros tensor,
+    # which would otherwise hand back a scale of zero and turn every
+    # later division into a NaN.
+
+
+def quantize(v, scale, bits=8):
+    """Convert real values to integer codes, saturating at the limits.
+
+    Returns an integer array, not floats. That distinction matters:
+    these codes are what a .mem file or an AXI stream actually carries,
+    and keeping them as integers here means a wrong scale shows up as
+    obviously-wrong data rather than as slightly-off floats.
+
+    Round rather than truncate. Truncation biases every value the same
+    direction, and across a fifteen-layer stack that bias compounds
+    into a drift large enough to erase the detections entirely.
+    """
+    # TODO 4: divide by the scale, round, clip to the signed range for
+    # `bits`, and return an integer dtype.
+
+
+def dequantize(codes, scale):
+    """Turn integer codes back into real values.
+
+    The inverse of quantize() except for what quantize() threw away:
+    everything below the scale's resolution, and anything that
+    saturated. Round-tripping a tensor through both is the cheapest way
+    to see what a format costs before running a whole network through
+    it.
+    """
+    # TODO 5: one multiply. Mind the dtype -- the result should be
+    # float32, not float64, or it will silently promote everything
+    # downstream of it.
+
+
+def requant_params(in_scale, weight_scale, out_scale, bits=16):
+    """Turn three float scales into the integer multiplier and shift.
+
+    This is the bridge between the study and the hardware. Convolving
+    quantized inputs with quantized weights gives an accumulator whose
+    real value is  acc * in_scale * weight_scale. Emitting the next
+    layer's input means expressing that in units of out_scale, so
+    every accumulator has to be multiplied by
+
+        M = in_scale * weight_scale / out_scale
+
+    M is a real number, usually well below 1, and no FPGA multiplies by
+    0.0037. So M is approximated as an integer over a power of two:
+
+        M ~= mult / 2^shift
+
+    which the hardware evaluates as one integer multiply followed by
+    one arithmetic shift. Returns (mult, shift) with `mult` fitting in
+    `bits` bits.
+
+    Choosing shift as large as `mult` allows is what makes the
+    approximation tight: every extra bit of shift is another bit of
+    precision in M. Too large and mult overflows its width; too small
+    and M is coarse enough to shift layer outputs visibly.
+    """
+    # TODO 6: form M from the three scales.
+
+    # TODO 7: find the largest shift for which round(M * 2^shift) still
+    # fits in a signed `bits`-bit integer, then return that mult and
+    # shift. Think about what happens if M is itself larger than 1 --
+    # it can be, when a layer's output range is narrower than its
+    # input's, and the shift search has to still terminate.
+
+
+def requantize(acc, mult, shift, bits=8):
+    """The hardware requantization stage, in software.
+
+    Takes a wide accumulator and produces the next layer's `bits`-bit
+    input: multiply by `mult`, round, shift right by `shift`, saturate.
+    This mirrors what the RTL does gate for gate, so a mismatch between
+    this and the accelerator is a real bug in one of them rather than a
+    modelling artefact.
+
+    The two knobs here are both traps.
+
+    Rounding: an arithmetic shift right floors toward negative
+    infinity, so shifting alone biases every single value the same
+    direction. Adding half an LSB before the shift is what turns it
+    into rounding, and it is one adder.
+
+    Saturation: a value that will not fit must be pinned at the limit,
+    not allowed to wrap. Wrapping sends the largest activation in a
+    channel to the most negative one, which is catastrophic but sparse
+    -- the output stays plausible, and the network still detects
+    things, just worse. It is invisible until a format is tightened
+    enough to overflow, which is precisely when you are optimizing and
+    least expecting a regression.
+    """
+    # TODO 8: multiply, add half an LSB, shift, saturate, return
+    # integer codes. Do the multiply in a width that cannot overflow --
+    # numpy will not warn you, and the answer will just be wrong.
