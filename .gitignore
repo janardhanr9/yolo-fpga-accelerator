@@ -3,6 +3,11 @@
 models/
 *.jpg
 
+# Calibration images are inputs to the golden vectors, so they are
+# versioned despite the *.jpg rule above -- a vector you cannot
+# regenerate is not a reference.
+!calib/*.jpg
+
 # Generated test vectors
 vectors/
 
