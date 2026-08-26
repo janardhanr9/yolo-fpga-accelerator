@@ -32,7 +32,7 @@ Design decisions and the measurements behind them are in
 | Reference model | complete — 33 tests, mutation-verified |
 | Quantization | complete — calibration, scales, requantization |
 | Golden vectors | complete — `.mem` files and a manifest |
-| RTL | line buffer in progress |
+| RTL | 2 of 4 datapath modules done |
 
 ```
 make test     reference model tests
@@ -131,16 +131,56 @@ reference across all nine conv layers.
 ## RTL
 
 ```
-rtl/line_buffer.sv     sliding-window generator      in progress
-tb/tb_line_buffer.sv   self-checking testbench       complete
+rtl/line_buffer.sv     3x3 window from a pixel stream        done
+rtl/mac_array.sv       16 filters in parallel, accumulated   done
+rtl/requantize.sv      accumulator -> next layer's input     4 TODOs
+rtl/conv_layer.sv      ties the three together               stub
+
+rtl/maxpool.sv         one-sided -inf padding, stride 2      5 TODOs
+rtl/weight_loader.sv   DDR -> on-chip, double buffered       stub
+rtl/layer_sequencer.sv walks the 15 layers                   stub
+rtl/accel_top.sv       AXI wrapper                           stub
 ```
+
+No `leaky_relu` module: the activation folds into the requantiser's
+multiplier as a second constant selected on the accumulator's sign, so
+it never becomes hardware of its own.
 
 SystemVerilog, restricted to the subset Icarus also accepts so that both
 simulators stay usable — see [DECISIONS.md](DECISIONS.md#platform).
 
+### The datapath, one layer
+
+```
+DDR -> line_buffer -> mac_array -> requantize -> DDR
+        holds 2 rows   144 mults    x mult, >> shift,
+        emits a 3x3    16 accs      saturate
+        window/cycle
+```
+
+One window per clock. `C_IN` windows accumulate into one output pixel;
+`ceil(N / 16)` passes over the image produce all its channels. The layer
+loop, the pass loop and the pixel loop all live outside `mac_array`,
+which is why it takes `first_channel` / `last_channel` rather than
+counting — one array serves a 3-channel layer and a 1024-channel one
+unchanged.
+
+### Verification
+
 Testbenches are self-checking and print `PASS` or `FAIL`. Each is
-validated against a behavioural model and then mutation-tested before it
-is trusted.
+validated against a behavioural model, then mutation-tested — deliberate
+bugs injected to confirm the suite notices — before it is trusted.
+
+Two habits that came out of doing that, both from real failures here:
+
+- **A testbench that can hang is worse than one that fails.** Verilator
+  initialises undriven signals to zero, so an unimplemented DUT left
+  `in_ready` low and the line buffer's testbench spun forever. Every
+  wait is now bounded and every suite carries a watchdog.
+- **A run that checked nothing is a failure, not a pass.** An undriven
+  `out_valid` reads as `x`, and `if (x)` is false — so the MAC array's
+  suite silently skipped every check and reported PASS. Comparisons are
+  written `!== 1'b1`, and a verdict with zero checks now fails.
 
 ## Results
 

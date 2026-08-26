@@ -78,7 +78,22 @@ module tb_requantize;
     // is up to 2^62. longint is 64-bit signed, so it fits -- but only
     // just, and it would not if ACC_W grew.
     // -----------------------------------------------------------------
-    
+    function automatic longint ref_requant(longint acc);
+        longint m;      // which multiplier
+        longint p;      // the product
+
+        // 1. pick, on the sign of ACC (not of the result)
+        //    mult and mult_neg are module-level signals -- the function can
+        //    read them directly, no need to pass them in
+
+        // 2. multiply
+
+        // 3. if shift > 0, add half an LSB then >>> shift
+        //    half an LSB is  1 << (shift-1)
+        //    guard shift == 0, where (shift-1) is a negative shift a
+
+        // 4. clip to OUT_LO .. OUT_HI, then return
+    endfunction
 
     // -----------------------------------------------------------------
     // TODO 2: drive one cycle and check every lane.
