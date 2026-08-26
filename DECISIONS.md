@@ -78,8 +78,14 @@ network, 49.9% on layer 8**.
 
 That costs **32 points of recall at 8 bits** (58.5% → 90.2%, with
 per-channel weights). Buying it back needs one multiplier per output
-lane: roughly **12% more DSPs at 16 lanes**, and it fires once per 9,216
-MACs on layer 13. Take that trade.
+lane — but a 48×16 product does not fit one DSP48E1, whose multiplier is
+25×18 signed, so each lane costs two slices: **32 DSPs at 16 lanes, 22%
+on top of the array's 144**. It fires once per 9,216 MACs on layer 13.
+Take that trade.
+
+Truncating the accumulator to 25 bits before the multiply would halve
+that to 16 DSPs, and the low bits are below the output format's
+resolution anyway. Worth measuring before spending the slices.
 
 **Rejected:** power-of-two scales. Free in hardware, and the most
 expensive decision available.
@@ -119,6 +125,32 @@ Rounding is half-up rather than half-even, because one adder plus a shift
 is what the hardware can afford. `quantize()` uses numpy's half-even; the
 difference appears only on exact halves, and `requantize()` is the
 function that models hardware.
+
+### The integer is a count; the scale is the unit
+
+There is no fixed binary point anywhere in the datapath. A stored value
+is an integer, and each stage carries a **scale** saying what one LSB is
+worth. The same 16-bit pattern means different things at different
+points:
+
+| stage | scale | `12345` means |
+|---|---|---|
+| layer input | `3.052e-05` | 0.377 |
+| a weight | `8.711e-04` | 10.754 |
+| layer output | `1.685e-03` | 20.801 |
+
+The accumulator's scale is `in_scale × weight_scale`, because every term
+in it was one input code times one weight code — **the units multiply**.
+
+Requantisation is therefore a change of counting unit, not a change of
+value: *"I hold 1,234,567 counts of 2.66e-08; how many counts of
+1.68e-03 is that?"* The multiply-and-shift is how that division gets done
+in integers.
+
+This is what distinguishes the design from a Q-format one, where bit
+*position* carries the value. Here position carries nothing — you need
+the scale, and the scale never appears in the RTL at all. It lives in
+Python, collapsed into `mult` and `shift` before synthesis.
 
 ### The accumulator width is asserted, not assumed
 
@@ -249,6 +281,34 @@ partition across a bus — and it can run the same Python the reference
 model uses.
 
 ---
+
+## What ships
+
+Python appears in the finished product in two places, and the reference
+model is not one of them.
+
+**Build time, once, on a laptop — ships as data.** `cfg.py` and
+`weights.py` parse darknet's files; `quant.py` folds batch norm,
+calibrates, and computes every scale; `dump_vectors.py` writes `.mem`
+files and `manifest.json`. What reaches the board is those files — the
+`mult = 16940, shift = 30` constants and the quantized weights. The
+Python that produced them does not, and never runs again unless the
+network is re-quantized.
+
+**Runtime, every frame, on the ARM core — ships as code.**
+`model.preprocess()` letterboxes the image in, `model.decode()` and
+`model.nms()` turn the last layer's output into boxes, and `host.py`
+drives the DMA between them. On a Zynq the host is a Linux core on the
+same die, so this is Python calling into PYNQ.
+
+**Never ships.** `layers.py`'s float convolution, `model.forward()`, and
+`tests/run.py` exist so the hardware can be told it disagrees with
+something. They are a measuring instrument, not part of the product.
+
+The dividing line is useful when deciding where work belongs: anything
+that can be computed once, before the first frame, should be — which is
+why the accelerator has no batch-norm unit, no scale registers, and no
+division.
 
 ## Platform
 

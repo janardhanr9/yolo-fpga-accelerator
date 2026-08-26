@@ -78,6 +78,7 @@ module tb_requantize;
     // is up to 2^62. longint is 64-bit signed, so it fits -- but only
     // just, and it would not if ACC_W grew.
     // -----------------------------------------------------------------
+    
 
     // -----------------------------------------------------------------
     // TODO 2: drive one cycle and check every lane.
