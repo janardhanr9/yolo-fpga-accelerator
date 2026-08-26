@@ -180,6 +180,28 @@ is layer 13 at **2 × 13 × 1024 = 26 KiB (52 KiB at 16-bit), under six
 BRAM36 blocks of 140** — because image width halves exactly as channel
 count doubles, holding the product nearly flat.
 
+### Window history lives in LUT-RAM, not flip-flops
+
+Channel is innermost in the stream, so between one channel's window at
+column *c* and its window at *c+1* exactly `C_IN` samples go by. Every
+horizontal stage is therefore a delay line of depth `C_IN`.
+
+Held in flip-flops that is `K*(K-1)*C_IN` of them — **98,304 at layer
+13's 1024 channels, 92% of the device**. Written instead as a memory
+indexed by `channel`, only one word changes per cycle, so synthesis
+infers distributed RAM or an SRL: **the same bits for about 3% of the
+LUTs**.
+
+Generalises: when a design does not fit, check whether it is the
+*amount* of state or the *resource holding it*. Long delay lines in
+flip-flops is one of the easiest ways to burn an FPGA.
+
+**Unverified.** This is inference, not a directive — only Vivado reports
+what it actually built, and Vivado has no macOS build. The first
+synthesis run should check the utilization report at layer 13's
+parameters. If it comes back as flip-flops, force it with
+`(* ram_style = "distributed" *)` on the declaration.
+
 ### Windows stream channel-serially
 
 `C_IN` reaches 1024 on layer 13. A channel-parallel window would be
