@@ -84,6 +84,12 @@ module mac_array #(
     // held as an unpacked array so the loops below can index it with a
     // variable, and bridged to the flat out_acc port with a genvar loop
     // -- the same pattern line_buffer uses for its window.
+    logic signed [ACC_W-1:0] acc [N_PE];
+
+    for (genvar i = 0; i < N_PE; i++) begin : acc_bridge
+        assign `ACC(i) = acc[i];
+    end
+
 
     // TODO 2: the products. For each PE, K*K multiplies of a window tap
     // against the corresponding weight tap, summed into one value.
@@ -100,11 +106,31 @@ module mac_array #(
     // the wrong answer for roughly half the data. $signed() on each
     // operand is what fixes it, and nothing will warn you.
 
+    logic signed [ACC_W-1:0] prod [N_PE];
+
+    always_comb begin
+        for (int pe = 0; pe < N_PE; pe++) begin
+            prod[pe] = 0;
+            for (int tap = 0; tap < K * K; tap++) begin
+                prod[pe] = prod[pe] + $signed(`WGT(pe, tap)) * $signed(`TAP(tap));
+            end
+        end
+    end
+
+
     // TODO 3: the accumulate step. On an accepted window, each PE's
     // accumulator takes either its own value plus this cycle's product
     // sum, or -- when first_channel is asserted -- the bias plus that
     // sum. Loading the bias on the first channel rather than adding it
     // at the end is free: the accumulator has to be initialised anyway.
+    always_ff @(posedge clk) begin
+        if (in_valid && in_ready) begin
+            for (int pe = 0; pe < N_PE; pe++) begin
+                if (first_channel)  acc[pe] <= $signed(`BIAS(pe)) + $signed(prod[pe]);
+                else                acc[pe] <= $signed(acc[pe]) + $signed(prod[pe]);
+            end
+        end
+    end
 
     // TODO 4: the output handshake. out_acc is valid on the cycle after
     // a window arrives with last_channel set. Note the accumulator is
@@ -114,6 +140,12 @@ module mac_array #(
     // in_ready can be tied high for now -- the array never stalls on its
     // own -- but leave the port so the requantizer downstream does not
     // need rewiring when it gains a FIFO.
+    always_ff @(posedge clk) begin
+        if (!rst_n) out_valid <= 1'b0;
+        else        out_valid <= in_valid && last_channel;
+    end
+
+    assign in_ready = 1'b1;
 
     `undef TAP
     `undef WGT
