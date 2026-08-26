@@ -16,7 +16,9 @@ PY      := .venv/bin/python
 IVERILOG:= iverilog -g2012 -Wall
 BUILD   := build
 
-TBS     := $(wildcard tb/tb_*.sv)
+# Only testbenches that actually contain a module -- the stubs for
+# unwritten ones would otherwise print an empty entry each run.
+TBS     := $(shell grep -l '^module' tb/tb_*.sv 2>/dev/null)
 OUTS    := $(patsubst tb/%.sv,$(BUILD)/%.out,$(TBS))
 
 .PHONY: test sim simv wave lint clean all
