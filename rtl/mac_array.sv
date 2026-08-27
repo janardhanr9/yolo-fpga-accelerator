@@ -80,31 +80,20 @@ module mac_array #(
     `define BIAS(pe)    bias[(pe)*ACC_W +: ACC_W]
     `define ACC(pe)     out_acc[(pe)*ACC_W +: ACC_W]
 
-    // TODO 1: the accumulators. One signed ACC_W-bit register per PE,
-    // held as an unpacked array so the loops below can index it with a
-    // variable, and bridged to the flat out_acc port with a genvar loop
-    // -- the same pattern line_buffer uses for its window.
+    // One accumulator per PE, unpacked so the loops below can index it
+    // with a variable, bridged to the flat port by a genvar loop.
     logic signed [ACC_W-1:0] acc [N_PE];
 
     for (genvar i = 0; i < N_PE; i++) begin : acc_bridge
         assign `ACC(i) = acc[i];
     end
 
-
-    // TODO 2: the products. For each PE, K*K multiplies of a window tap
-    // against the corresponding weight tap, summed into one value.
+    // Nine multiplies per PE, summed to one value. Combinational, so
+    // synthesis sees an adder tree it can pipeline later.
     //
-    // Write this as combinational logic, not as a clocked block: the
-    // adder tree between the multipliers and the accumulator is what
-    // synthesis needs to see in order to pipeline it later. A single
-    // always_comb with two nested loops is enough; sizing the running
-    // sum at ACC_W keeps every partial sum from truncating.
-    //
-    // Mind the sign. Both operands are signed, and Verilog treats a
-    // part-select of a signed vector as UNSIGNED -- so a bare
-    // `TAP(i) * `WGT(pe, i) multiplies two positive numbers and gets
-    // the wrong answer for roughly half the data. $signed() on each
-    // operand is what fixes it, and nothing will warn you.
+    // $signed() on both operands is load-bearing: Verilog treats a
+    // part-select of a signed vector as UNSIGNED, so a bare multiply
+    // gets roughly half the data wrong and nothing warns.
 
     logic signed [ACC_W-1:0] prod [N_PE];
 
@@ -117,12 +106,9 @@ module mac_array #(
         end
     end
 
-
-    // TODO 3: the accumulate step. On an accepted window, each PE's
-    // accumulator takes either its own value plus this cycle's product
-    // sum, or -- when first_channel is asserted -- the bias plus that
-    // sum. Loading the bias on the first channel rather than adding it
-    // at the end is free: the accumulator has to be initialised anyway.
+    // Bias loads on the first channel rather than being added at the
+    // end, which is free -- the accumulator has to be initialised
+    // anyway -- and keeps it in accumulator units.
     always_ff @(posedge clk) begin
         if (in_valid && in_ready) begin
             for (int pe = 0; pe < N_PE; pe++) begin
@@ -132,14 +118,11 @@ module mac_array #(
         end
     end
 
-    // TODO 4: the output handshake. out_acc is valid on the cycle after
-    // a window arrives with last_channel set. Note the accumulator is
-    // registered, so out_valid has to be registered too or it will lead
-    // its data by a cycle.
-    //
-    // in_ready can be tied high for now -- the array never stalls on its
-    // own -- but leave the port so the requantizer downstream does not
-    // need rewiring when it gains a FIFO.
+    // out_acc is valid the cycle after a window arrives with
+    // last_channel set, so out_valid is registered alongside the data.
+    // in_ready is tied high -- the array never stalls on its own -- but
+    // the port stays so the requantiser does not need rewiring when it
+    // gains a FIFO.
     always_ff @(posedge clk) begin
         if (!rst_n) out_valid <= 1'b0;
         else        out_valid <= in_valid && last_channel;
