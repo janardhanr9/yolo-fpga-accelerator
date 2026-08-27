@@ -12,7 +12,7 @@ Two halves that have to agree:
 from parsing darknet's `.cfg` and `.weights` through to decoded
 detections. It is the golden model -- when the accelerator disagrees with
 it, the accelerator is wrong. It reproduces darknet's published output:
-`person.jpg` gives dog + person + horse at 0.91–0.92.
+`person.jpg` gives dog + person + horse at 0.91-0.92.
 
 **`rtl/`** is the accelerator: a weight-streaming convolution datapath
 driven from DDR, with region decode and preprocessing left on the ARM
@@ -44,24 +44,24 @@ make lint     verilator static checks
 
 ## Layer table
 
-| #  | type    | in H×W×C     | k | stride | pad          | out H×W×C    | params     | MACs          |
+| #  | type    | in HxWxC     | k | stride | pad          | out HxWxC    | params     | MACs          |
 |----|---------|--------------|---|--------|--------------|--------------|------------|---------------|
-| 1  | conv    | 416×416×3    | 3 | 1      | 1            | 416×416×16   | 432        | 74,760,192    |
-| 2  | maxpool | 416×416×16   | 2 | 2      | –            | 208×208×16   | 0          | –             |
-| 3  | conv    | 208×208×16   | 3 | 1      | 1            | 208×208×32   | 4,608      | 199,360,512   |
-| 4  | maxpool | 208×208×32   | 2 | 2      | –            | 104×104×32   | 0          | –             |
-| 5  | conv    | 104×104×32   | 3 | 1      | 1            | 104×104×64   | 18,432     | 199,360,512   |
-| 6  | maxpool | 104×104×64   | 2 | 2      | –            | 52×52×64     | 0          | –             |
-| 7  | conv    | 52×52×64     | 3 | 1      | 1            | 52×52×128    | 73,728     | 199,360,512   |
-| 8  | maxpool | 52×52×128    | 2 | 2      | –            | 26×26×128    | 0          | –             |
-| 9  | conv    | 26×26×128    | 3 | 1      | 1            | 26×26×256    | 294,912    | 199,360,512   |
-| 10 | maxpool | 26×26×256    | 2 | 2      | –            | 13×13×256    | 0          | –             |
-| 11 | conv    | 13×13×256    | 3 | 1      | 1            | 13×13×512    | 1,179,648  | 199,360,512   |
-| 12 | maxpool | 13×13×512    | 2 | 1      | effective 1  | 13×13×512    | 0          | –             |
-| 13 | conv    | 13×13×512    | 3 | 1      | 1            | 13×13×1024   | 4,718,592  | 797,442,048   |
-| 14 | conv    | 13×13×1024   | 3 | 1      | 1            | 13×13×512    | 4,718,592  | 797,442,048   |
-| 15 | conv    | 13×13×512    | 1 | 1      | 1 (effective 0) | 13×13×425 | 217,600    | 36,774,400    |
-| 16 | region  | 13×13×425    | – | –      | –            | detections   | –          | –             |
+| 1  | conv    | 416x416x3    | 3 | 1      | 1            | 416x416x16   | 432        | 74,760,192    |
+| 2  | maxpool | 416x416x16   | 2 | 2      | -            | 208x208x16   | 0          | -             |
+| 3  | conv    | 208x208x16   | 3 | 1      | 1            | 208x208x32   | 4,608      | 199,360,512   |
+| 4  | maxpool | 208x208x32   | 2 | 2      | -            | 104x104x32   | 0          | -             |
+| 5  | conv    | 104x104x32   | 3 | 1      | 1            | 104x104x64   | 18,432     | 199,360,512   |
+| 6  | maxpool | 104x104x64   | 2 | 2      | -            | 52x52x64     | 0          | -             |
+| 7  | conv    | 52x52x64     | 3 | 1      | 1            | 52x52x128    | 73,728     | 199,360,512   |
+| 8  | maxpool | 52x52x128    | 2 | 2      | -            | 26x26x128    | 0          | -             |
+| 9  | conv    | 26x26x128    | 3 | 1      | 1            | 26x26x256    | 294,912    | 199,360,512   |
+| 10 | maxpool | 26x26x256    | 2 | 2      | -            | 13x13x256    | 0          | -             |
+| 11 | conv    | 13x13x256    | 3 | 1      | 1            | 13x13x512    | 1,179,648  | 199,360,512   |
+| 12 | maxpool | 13x13x512    | 2 | 1      | effective 1  | 13x13x512    | 0          | -             |
+| 13 | conv    | 13x13x512    | 3 | 1      | 1            | 13x13x1024   | 4,718,592  | 797,442,048   |
+| 14 | conv    | 13x13x1024   | 3 | 1      | 1            | 13x13x512    | 4,718,592  | 797,442,048   |
+| 15 | conv    | 13x13x512    | 1 | 1      | 1 (effective 0) | 13x13x425 | 217,600    | 36,774,400    |
+| 16 | region  | 13x13x425    | - | -      | -            | detections   | -          | -             |
 |    | **total** |            |   |        |              |              | **11,226,544** | **2,703,221,248** |
 
 Params are convolution weights only; batch-norm scales/means/variances and
@@ -106,13 +106,13 @@ Three darknet quirks are reproduced rather than corrected, since matching
 darknet is the point:
 
 - `pad=1` in the cfg is a flag meaning "pad to same", resolving to
-  `size // 2` -- so the 1×1 output conv pads nothing despite saying
+  `size // 2` -- so the 1x1 output conv pads nothing despite saying
   `pad=1`.
 - Batch norm normalises by `sqrt(var) + eps`, not the `sqrt(var + eps)`
   every other framework uses.
 - Maxpool pads by `size - 1` entirely on the bottom and right with
   `-inf`. Only layer 12 reaches that padding, and it is what holds the
-  network at 13×13 instead of 12×12.
+  network at 13x13 instead of 12x12.
 
 ### Golden vectors
 
@@ -126,7 +126,7 @@ shift. The byte order in those files is the memory layout the DMA reads --
 activations are HWC, weights channel-major -- and the manifest records it
 so the RTL and the testbench cannot drift apart silently.
 
-The fixed-point path drifts 0.007%–0.018% of full scale from the float
+The fixed-point path drifts 0.007%-0.018% of full scale from the float
 reference across all nine conv layers.
 
 ## RTL
