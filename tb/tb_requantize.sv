@@ -85,14 +85,22 @@ module tb_requantize;
         // 1. pick, on the sign of ACC (not of the result)
         //    mult and mult_neg are module-level signals -- the function can
         //    read them directly, no need to pass them in
+        m = acc < 0 ? longint'($signed(mult_neg))
+                : longint'($signed(mult));
 
         // 2. multiply
+        p = acc * m;
 
         // 3. if shift > 0, add half an LSB then >>> shift
         //    half an LSB is  1 << (shift-1)
         //    guard shift == 0, where (shift-1) is a negative shift a
+        if (shift > 0)
+            p = (p + (longint'(1) << (shift - 1))) >>> shift;
 
         // 4. clip to OUT_LO .. OUT_HI, then return
+        if (p < OUT_LO)         return OUT_LO;
+        else if (p > OUT_HI)    return OUT_HI;
+        return p;
     endfunction
 
     // -----------------------------------------------------------------

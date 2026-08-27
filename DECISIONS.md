@@ -121,6 +121,42 @@ tightened enough to overflow, which is exactly when you are optimizing
 and least expecting a regression, and the output stays plausible enough
 to pass a smoke test.
 
+#### Why adding half turns floor into round
+
+`p >>> shift` is `floor(p / 2^shift)`. It steps up when the true value
+crosses a **whole** number, so everything between `n.0` and `n.999` lands
+on `n` — always the value below.
+
+Adding half the divisor first moves that step-up point back by half a
+division, so it lands on `n` only up to `n.5` and on `n+1` after. Which
+is what "nearest" means.
+
+Dividing by 8, where half is 4:
+
+| `p` | true `p/8` | `p >>> 3` | `(p + 4) >>> 3` |
+|---|---|---|---|
+| 3 | 0.375 | 0 | 0 |
+| **4** | **0.500** | **0** | **1** |
+| 7 | 0.875 | 0 | 1 |
+| 8 | 1.000 | 1 | 1 |
+| **12** | **1.500** | **1** | **2** |
+
+The adder costs one gate delay. What it buys is not precision but the
+absence of **bias** — measured over `p = 0..63`:
+
+| | average error | average bias |
+|---|---|---|
+| floor | 0.438 | **−0.438** |
+| round | 0.250 | +0.062 |
+
+The errors are comparable. The difference is that floor is wrong in the
+*same direction every time*, so it accumulates: fifteen layers of −0.438
+drifts about −6.6 LSB, with every activation in the network shifting
+down together. Rounding scatters either side of zero and cancels.
+
+That is the difference between "slightly less precise" and "the
+detections disappear".
+
 Rounding is half-up rather than half-even, because one adder plus a shift
 is what the hardware can afford. `quantize()` uses numpy's half-even; the
 difference appears only on exact halves, and `requantize()` is the
