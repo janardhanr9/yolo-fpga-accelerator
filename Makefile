@@ -21,7 +21,7 @@ BUILD   := build
 TBS     := $(shell grep -l '^module' tb/tb_*.sv 2>/dev/null)
 OUTS    := $(patsubst tb/%.sv,$(BUILD)/%.out,$(TBS))
 
-.PHONY: test sim simv wave lint clean all
+.PHONY: test sim simv wave lint mutants clean all
 all: test sim
 
 test:
@@ -50,6 +50,11 @@ simv:
 	    && $(BUILD)/$$name/$$name 2>&1 | grep -E '^(PASS|FAIL| )' \
 	    || echo "  build failed"; \
 	done
+
+# A testbench that has only ever passed proves nothing: you have watched
+# it agree with a correct design, not disagree with a wrong one.
+mutants:
+	@$(PY) tests/mutants.py
 
 lint:
 	@for f in rtl/*.sv; do \

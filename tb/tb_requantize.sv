@@ -121,6 +121,16 @@ module tb_requantize;
                     end
                 end
             end
+
+            // out_valid must fall again. Without this the suite passes a
+            // DUT whose out_valid sets and never clears, which would tell
+            // the next stage every cycle carries a finished result.
+            @(posedge clk); #1;
+            if (out_valid !== 1'b0) begin
+                $display("  FAIL %s: out_valid still high a cycle later", label);
+                errors++;
+            end
+            checks++;
         end
     endtask
 
