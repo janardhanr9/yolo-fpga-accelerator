@@ -14,6 +14,9 @@ vectors/
 # Local notes, not part of the repo
 DECISIONS.md
 
+# Editor
+.vscode/
+
 # Python
 __pycache__/
 .venv/
