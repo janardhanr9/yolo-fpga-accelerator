@@ -33,7 +33,7 @@ reasoning and the measurements behind it.
 | Reference model | complete -- 33 tests, mutation-verified |
 | Quantization | complete -- calibration, scales, requantization |
 | Golden vectors | complete -- `.mem` files and a manifest |
-| RTL | 2 of 4 datapath modules done |
+| RTL | 3 of 4 datapath modules done |
 
 ```
 make test     reference model tests
@@ -134,8 +134,8 @@ reference across all nine conv layers.
 ```
 rtl/line_buffer.sv     3x3 window from a pixel stream        done
 rtl/mac_array.sv       16 filters in parallel, accumulated   done
-rtl/requantize.sv      accumulator -> next layer's input     4 TODOs
-rtl/conv_layer.sv      ties the three together               stub
+rtl/requantize.sv      accumulator -> next layer's input     done
+rtl/conv_layer.sv      ties the three together               5 TODOs
 
 rtl/maxpool.sv         one-sided -inf padding, stride 2      5 TODOs
 rtl/weight_loader.sv   DDR -> on-chip, double buffered       stub
