@@ -11,6 +11,9 @@ models/
 # Generated test vectors
 vectors/
 
+# Local notes, not part of the repo
+DECISIONS.md
+
 # Python
 __pycache__/
 .venv/

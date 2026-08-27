@@ -22,8 +22,9 @@ core, where they cost microseconds and would otherwise put `exp` and
 `tools/dump_vectors.py` bridges them, writing per-layer `.mem` files so a
 mismatch is located at a layer rather than at the output.
 
-Design decisions and the measurements behind them are in
-[DECISIONS.md](DECISIONS.md).
+Design decisions are recorded alongside the code they govern -- the
+module headers in `rtl/` and the docstrings in `reference/` carry the
+reasoning and the measurements behind it.
 
 ### Status
 
@@ -147,7 +148,9 @@ multiplier as a second constant selected on the accumulator's sign, so
 it never becomes hardware of its own.
 
 SystemVerilog, restricted to the subset Icarus also accepts so that both
-simulators stay usable -- see [DECISIONS.md](DECISIONS.md#platform).
+simulators stay usable. Two constructs are avoided: variable indexing
+into a packed multi-dimensional array, and named struct assignment
+patterns. Both are Verilator-only.
 
 ### The datapath, one layer
 
