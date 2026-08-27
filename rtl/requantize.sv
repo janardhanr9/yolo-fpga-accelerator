@@ -47,39 +47,45 @@ module requantize #(
     `define ACC(pe)  in_acc[(pe)*ACC_W +: ACC_W]
     `define OUT(pe)  out_data[(pe)*OUT_W +: OUT_W]
 
-    // TODO 1: the product. Each lane multiplies its accumulator by mult
-    // or mult_neg, chosen on the accumulator's sign.
-    //
-    // Width matters here and nothing will warn you. ACC_W + MULT_W bits
-    // is 64 for the defaults, and a product held in anything narrower
-    // wraps silently -- the same failure reference/quant.py asserts
-    // against, because numpy is equally quiet about it.
-    //
-    // Note the sign test is on the ACCUMULATOR, not on the result.
-    // Requantisation is monotonic so they agree, but the accumulator is
-    // what the hardware has in hand at that point.
+    // One independent lane per PE. The sign test is on the ACCUMULATOR
+    // rather than the result: requantisation is monotonic so they agree,
+    // but the accumulator is what the hardware has in hand at that point.
+    // Product width. Anything narrower wraps silently.
+    localparam int P_W = ACC_W + MULT_W;
 
-    // TODO 2: rounding. An arithmetic shift right floors toward negative
-    // infinity, so shifting alone biases every value the same direction
-    // -- and fifteen layers of that erases the detections entirely.
-    // Adding half an LSB before the shift is what turns the floor into
-    // a round, and it is one adder.
-    //
-    // Half an LSB is 1 << (shift-1). Guard shift == 0, where that
-    // expression is a negative shift amount.
+    // Held at the product's width, not OUT_W: they are compared against
+    // `rounded`, and an OUT_W-wide limit would truncate before the
+    // comparison ever happened.
+    localparam logic signed [P_W-1:0] OUT_LO = -(1 <<< (OUT_W-1));
+    localparam logic signed [P_W-1:0] OUT_HI =  (1 <<< (OUT_W-1)) - 1;
 
-    // TODO 3: saturation. A value that will not fit must pin at the
-    // limit, never wrap. A wrapped value sends a channel's strongest
-    // activation to its most negative and stays plausible enough to
-    // survive a smoke test -- measured, it costs about a third of the
-    // detection confidence while still finding the object.
-    //
-    // The limits are asymmetric: -2^(OUT_W-1) and +2^(OUT_W-1)-1. Using
-    // the same bound for both silently discards a code.
+    for (genvar pe = 0; pe < N_PE; pe++) begin : lane
 
-    // TODO 4: the output handshake. out_data is valid the cycle after an
-    // accepted accumulator. Register out_valid alongside the data or it
-    // will lead by a cycle. in_ready can be tied high for now.
+        wire signed [P_W-1:0] prod =
+            $signed(`ACC(pe)) < 0 ? $signed(`ACC(pe)) * mult_neg
+                                  : $signed(`ACC(pe)) * mult;
+
+        wire signed [P_W-1:0] rounded =
+            (shift > 0) ? (prod + (P_W'(1) << (shift - 1))) >>> shift
+                        : prod;
+
+        wire signed [OUT_W-1:0] saturated =
+            (rounded > OUT_HI) ? OUT_W'(OUT_HI) :
+            (rounded < OUT_LO) ? OUT_W'(OUT_LO) : OUT_W'(rounded);
+
+        assign `OUT(pe) = saturated;
+
+    end
+
+    // out_data is valid the cycle after an accepted accumulator, so
+    // out_valid is a registered copy of in_valid -- not a flag that sets
+    // and stays set, which would tell the next stage that every cycle
+    // carries a finished result.
+    always_ff @(posedge clk) begin
+        if (!rst_n)         out_valid <= 1'b0;
+        else                out_valid <= in_valid;
+    end
+    assign in_ready = 1'b1;
 
     `undef ACC
     `undef OUT
