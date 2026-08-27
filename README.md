@@ -10,7 +10,7 @@ Two halves that have to agree:
 
 **`reference/`** is a float implementation of the whole network in numpy,
 from parsing darknet's `.cfg` and `.weights` through to decoded
-detections. It is the golden model — when the accelerator disagrees with
+detections. It is the golden model -- when the accelerator disagrees with
 it, the accelerator is wrong. It reproduces darknet's published output:
 `person.jpg` gives dog + person + horse at 0.91–0.92.
 
@@ -29,9 +29,9 @@ Design decisions and the measurements behind them are in
 
 | | |
 |---|---|
-| Reference model | complete — 33 tests, mutation-verified |
-| Quantization | complete — calibration, scales, requantization |
-| Golden vectors | complete — `.mem` files and a manifest |
+| Reference model | complete -- 33 tests, mutation-verified |
+| Quantization | complete -- calibration, scales, requantization |
+| Golden vectors | complete -- `.mem` files and a manifest |
 | RTL | 2 of 4 datapath modules done |
 
 ```
@@ -76,7 +76,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 RTL simulation needs Icarus Verilog and Verilator (`brew install
 icarus-verilog verilator`). Synthesis needs Vivado, which has no macOS
-build — that step runs on Windows or Linux.
+build -- that step runs on Windows or Linux.
 
 Weights (44,948,600 bytes) are not tracked in git; fetch into `models/`:
 
@@ -97,7 +97,7 @@ reference/model.py     assemble, run, and decode to detections
 
 `conv2d` uses im2col rather than nested loops, and not only for speed:
 the resulting matrix multiply is the shape the PE array runs. For layer 1
-it is `(16, 27) @ (27, 173056)` — 27 is the systolic depth, 16 the number
+it is `(16, 27) @ (27, 173056)` -- 27 is the systolic depth, 16 the number
 of PEs, 173,056 the stream length. The nine-tap gather it builds is the
 same structure `rtl/line_buffer.sv` implements in registers.
 
@@ -105,7 +105,7 @@ Three darknet quirks are reproduced rather than corrected, since matching
 darknet is the point:
 
 - `pad=1` in the cfg is a flag meaning "pad to same", resolving to
-  `size // 2` — so the 1×1 output conv pads nothing despite saying
+  `size // 2` -- so the 1×1 output conv pads nothing despite saying
   `pad=1`.
 - Batch norm normalises by `sqrt(var) + eps`, not the `sqrt(var + eps)`
   every other framework uses.
@@ -121,8 +121,8 @@ python tools/dump_vectors.py --layer 0
 
 Writes `vectors/layer00_{input,weights,bias,expected}.mem` for
 `$readmemh`, plus `manifest.json` carrying every scale, multiplier and
-shift. The byte order in those files is the memory layout the DMA reads —
-activations are HWC, weights channel-major — and the manifest records it
+shift. The byte order in those files is the memory layout the DMA reads --
+activations are HWC, weights channel-major -- and the manifest records it
 so the RTL and the testbench cannot drift apart silently.
 
 The fixed-point path drifts 0.007%–0.018% of full scale from the float
@@ -147,7 +147,7 @@ multiplier as a second constant selected on the accumulator's sign, so
 it never becomes hardware of its own.
 
 SystemVerilog, restricted to the subset Icarus also accepts so that both
-simulators stay usable — see [DECISIONS.md](DECISIONS.md#platform).
+simulators stay usable -- see [DECISIONS.md](DECISIONS.md#platform).
 
 ### The datapath, one layer
 
@@ -162,14 +162,14 @@ One window per clock. `C_IN` windows accumulate into one output pixel;
 `ceil(N / 16)` passes over the image produce all its channels. The layer
 loop, the pass loop and the pixel loop all live outside `mac_array`,
 which is why it takes `first_channel` / `last_channel` rather than
-counting — one array serves a 3-channel layer and a 1024-channel one
+counting -- one array serves a 3-channel layer and a 1024-channel one
 unchanged.
 
 ### Verification
 
 Testbenches are self-checking and print `PASS` or `FAIL`. Each is
-validated against a behavioural model, then mutation-tested — deliberate
-bugs injected to confirm the suite notices — before it is trusted.
+validated against a behavioural model, then mutation-tested -- deliberate
+bugs injected to confirm the suite notices -- before it is trusted.
 
 Two habits that came out of doing that, both from real failures here:
 
@@ -178,7 +178,7 @@ Two habits that came out of doing that, both from real failures here:
   `in_ready` low and the line buffer's testbench spun forever. Every
   wait is now bounded and every suite carries a watchdog.
 - **A run that checked nothing is a failure, not a pass.** An undriven
-  `out_valid` reads as `x`, and `if (x)` is false — so the MAC array's
+  `out_valid` reads as `x`, and `if (x)` is false -- so the MAC array's
   suite silently skipped every check and reported PASS. Comparisons are
   written `!== 1'b1`, and a verdict with zero checks now fails.
 
